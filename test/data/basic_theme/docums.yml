@@ -1,0 +1,6 @@
+site_name: test
+site_url: https://example.invalid/
+theme: docums
+
+nav:
+  - Home: index.md

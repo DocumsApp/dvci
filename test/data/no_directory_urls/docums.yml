@@ -1,0 +1,8 @@
+site_name: test
+site_url: https://example.invalid/
+theme: docums
+use_directory_urls: false
+
+nav:
+  - Home: index.md
+  - Page: page.md

@@ -1,0 +1,357 @@
+import os
+import unittest
+
+from . import assertPopen, assertOutput
+from .. import *
+from dvci import git_utils, versions
+
+
+class DeployTestCase(unittest.TestCase):
+    def _test_deploy(self, expected_message=None,
+                     expected_versions=[versions.VersionInfo('1.0')],
+                     redirect=True, directory='.'):
+        rev = git_utils.get_latest_commit('master', short=True)
+        message = assertPopen(['git', 'log', '-1', '--pretty=%B']).rstrip()
+        if expected_message:
+            self.assertEqual(message, expected_message)
+        else:
+            self.assertRegex(
+                message,
+                r'^Deployed {} to {}( in .*)? with Docums \S+ and dvci \S+$'
+                .format(rev, expected_versions[0].version)
+            )
+
+        files = {'versions.json'}
+        for v in expected_versions:
+            v_str = str(v.version)
+            files |= {v_str, v_str + '/index.html',
+                      v_str + '/css/version-select.css',
+                      v_str + '/js/version-select.js'}
+            for a in v.aliases:
+                files |= {a, a + '/index.html'}
+                if not redirect:
+                    files |= {a + '/css/version-select.css',
+                              a + '/js/version-select.js'}
+        assertDirectory(directory, files, allow_extra=True)
+
+        with open(os.path.join(directory, 'versions.json')) as f:
+            self.assertEqual(list(versions.Versions.loads(f.read())),
+                             expected_versions)
+
+
+class TestDeploy(DeployTestCase):
+    def setUp(self):
+        self.stage = stage_dir('deploy')
+        git_init()
+        copytree(os.path.join(test_data_dir, 'basic_theme'), self.stage)
+        check_call_silent(['git', 'add', 'docums.yml', 'docs'])
+        check_call_silent(['git', 'commit', '-m', 'initial commit'])
+
+    def test_default(self):
+        assertPopen(['dvci', 'deploy', '1.0'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy()
+
+    def test_title(self):
+        assertPopen(['dvci', 'deploy', '1.0', '-t', '1.0.0'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy(expected_versions=[
+            versions.VersionInfo('1.0', '1.0.0')
+        ])
+
+    def test_aliases(self):
+        assertPopen(['dvci', 'deploy', '1.0', 'latest'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy(expected_versions=[
+            versions.VersionInfo('1.0', aliases=['latest'])
+        ])
+        with open('latest/index.html') as f:
+            self.assertRegex(f.read(), match_redir('../1.0/'))
+
+    def test_aliases_copy(self):
+        assertPopen(['dvci', 'deploy', '1.0', 'latest', '--no-redirect'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy(expected_versions=[
+            versions.VersionInfo('1.0', aliases=['latest'])
+        ], redirect=False)
+
+    def test_aliases_custom_redirect(self):
+        assertPopen(['dvci', 'deploy', '1.0', 'latest', '-T',
+                     os.path.join(test_data_dir, 'template.html')])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy(expected_versions=[
+            versions.VersionInfo('1.0', aliases=['latest'])
+        ])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+
+        with open('latest/index.html') as f:
+            self.assertEqual(f.read(), 'Redirecting to ../1.0/')
+
+    def test_update(self):
+        assertPopen(['dvci', 'deploy', '1.0', 'latest'])
+        assertPopen(['dvci', 'deploy', '1.0', 'greatest', '-t', '1.0.1'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy(expected_versions=[
+            versions.VersionInfo('1.0', '1.0.1', ['latest', 'greatest'])
+        ])
+
+    def test_update_aliases(self):
+        assertPopen(['dvci', 'deploy', '1.0', 'latest'])
+        assertPopen(['dvci', 'deploy', '2.0', 'latest', '-u'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy(expected_versions=[
+            versions.VersionInfo('2.0', aliases=['latest']),
+            versions.VersionInfo('1.0'),
+        ])
+
+    def test_from_subdir(self):
+        os.mkdir('sub')
+        with pushd('sub'):
+            assertPopen(['dvci', 'deploy', '1.0'], returncode=1)
+            assertPopen(['dvci', 'deploy', '1.0', '-F', '../docums.yml'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy()
+
+    def test_branch(self):
+        assertPopen(['dvci', 'deploy', '1.0', '-b', 'branch'])
+        check_call_silent(['git', 'checkout', 'branch'])
+        self._test_deploy()
+
+    def test_commit_message(self):
+        assertPopen(['dvci', 'deploy', '1.0', '-m', 'commit message'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy('commit message')
+
+    def test_prefix(self):
+        assertPopen(['dvci', 'deploy', '1.0', '--prefix', 'prefix'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy(directory='prefix')
+
+    def test_push(self):
+        check_call_silent(['git', 'config', 'receive.denyCurrentBranch',
+                           'ignore'])
+        stage_dir('deploy_clone')
+        check_call_silent(['git', 'clone', self.stage, '.'])
+        git_config()
+
+        assertPopen(['dvci', 'deploy', '1.0', '-p'])
+        clone_rev = git_utils.get_latest_commit('gh-pages')
+
+        with pushd(self.stage):
+            self.assertEqual(git_utils.get_latest_commit('gh-pages'),
+                             clone_rev)
+
+    def test_remote_empty(self):
+        stage_dir('deploy_clone')
+        check_call_silent(['git', 'clone', self.stage, '.'])
+        git_config()
+
+        with git_utils.Commit('gh-pages', 'add file') as commit:
+            commit.add_file(git_utils.FileInfo(
+                'file.txt', 'this is some text'
+            ))
+        old_rev = git_utils.get_latest_commit('gh-pages')
+
+        assertPopen(['dvci', 'deploy', '1.0'])
+        self.assertEqual(git_utils.get_latest_commit('gh-pages^'), old_rev)
+
+    def test_local_empty(self):
+        with git_utils.Commit('gh-pages', 'add file') as commit:
+            commit.add_file(git_utils.FileInfo(
+                'file.txt', 'this is some text'
+            ))
+        origin_rev = git_utils.get_latest_commit('gh-pages')
+
+        stage_dir('deploy_clone')
+        check_call_silent(['git', 'clone', self.stage, '.'])
+        git_config()
+
+        assertPopen(['dvci', 'deploy', '1.0'])
+        self.assertEqual(git_utils.get_latest_commit('gh-pages^'), origin_rev)
+
+    def test_ahead_remote(self):
+        with git_utils.Commit('gh-pages', 'add file') as commit:
+            commit.add_file(git_utils.FileInfo(
+                'file.txt', 'this is some text'
+            ))
+        origin_rev = git_utils.get_latest_commit('gh-pages')
+
+        stage_dir('deploy_clone')
+        check_call_silent(['git', 'clone', self.stage, '.'])
+        check_call_silent(['git', 'fetch', 'origin', 'gh-pages:gh-pages'])
+        git_config()
+
+        with git_utils.Commit('gh-pages', 'add file') as commit:
+            commit.add_file(git_utils.FileInfo(
+                'file2.txt', 'this is some text'
+            ))
+        old_rev = git_utils.get_latest_commit('gh-pages')
+
+        assertPopen(['dvci', 'deploy', '1.0'])
+        self.assertEqual(git_utils.get_latest_commit('gh-pages^'), old_rev)
+        self.assertEqual(git_utils.get_latest_commit('gh-pages^^'), origin_rev)
+
+    def test_behind_remote(self):
+        with git_utils.Commit('gh-pages', 'add file') as commit:
+            commit.add_file(git_utils.FileInfo(
+                'file.txt', 'this is some text'
+            ))
+
+        stage_dir('deploy_clone')
+        check_call_silent(['git', 'clone', self.stage, '.'])
+        check_call_silent(['git', 'fetch', 'origin', 'gh-pages:gh-pages'])
+        git_config()
+
+        with pushd(self.stage):
+            with git_utils.Commit('gh-pages', 'add file') as commit:
+                commit.add_file(git_utils.FileInfo(
+                    'file2.txt', 'this is some text'
+                ))
+            origin_rev = git_utils.get_latest_commit('gh-pages')
+        check_call_silent(['git', 'fetch', 'origin'])
+
+        assertPopen(['dvci', 'deploy', '1.0'])
+        self.assertEqual(git_utils.get_latest_commit('gh-pages^'), origin_rev)
+
+    def test_diverged_remote(self):
+        with git_utils.Commit('gh-pages', 'add file') as commit:
+            commit.add_file(git_utils.FileInfo(
+                'file.txt', 'this is some text'
+            ))
+
+        stage_dir('deploy_clone')
+        check_call_silent(['git', 'clone', self.stage, '.'])
+        check_call_silent(['git', 'fetch', 'origin', 'gh-pages:gh-pages'])
+        git_config()
+
+        with pushd(self.stage):
+            with git_utils.Commit('gh-pages', 'add file') as commit:
+                commit.add_file(git_utils.FileInfo(
+                    'file2-origin.txt', 'this is some text'
+                ))
+            origin_rev = git_utils.get_latest_commit('gh-pages')
+
+        with git_utils.Commit('gh-pages', 'add file') as commit:
+            commit.add_file(git_utils.FileInfo(
+                'file2.txt', 'this is some text'
+            ))
+        clone_rev = git_utils.get_latest_commit('gh-pages')
+        check_call_silent(['git', 'fetch', 'origin'])
+
+        assertOutput(self, ['dvci', 'deploy', '1.0'], output=(
+            'error: gh-pages has diverged from origin/gh-pages\n' +
+            '  Pass --ignore to ignore this or --rebase to rebase onto ' +
+            'remote\n'
+        ), returncode=1)
+        self.assertEqual(git_utils.get_latest_commit('gh-pages'), clone_rev)
+
+        assertPopen(['dvci', 'deploy', '1.0', '--ignore'])
+        self.assertEqual(git_utils.get_latest_commit('gh-pages^'), clone_rev)
+
+        assertPopen(['dvci', 'deploy', '1.0', '--rebase'])
+        self.assertEqual(git_utils.get_latest_commit('gh-pages^'), origin_rev)
+
+
+class TestDeployDocumsYaml(DeployTestCase):
+    def setUp(self):
+        self.stage = stage_dir('deploy_docums_yaml')
+        git_init()
+        copytree(os.path.join(test_data_dir, 'docums_yaml'), self.stage)
+        check_call_silent(['git', 'add', 'docums.yaml', 'docs'])
+        check_call_silent(['git', 'commit', '-m', 'initial commit'])
+
+    def test_default(self):
+        assertPopen(['dvci', 'deploy', '1.0'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy()
+
+
+class TestDeployPlugin(DeployTestCase):
+    def setUp(self):
+        self.stage = stage_dir('deploy_plugin')
+        git_init()
+        copytree(os.path.join(test_data_dir, 'docums_plugin'), self.stage)
+        check_call_silent(['git', 'add', 'docums.yml', 'docs'])
+        check_call_silent(['git', 'commit', '-m', 'initial commit'])
+
+    def test_default(self):
+        assertPopen(['dvci', 'deploy', '1.0'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy()
+
+
+class TestDeployCustomSiteDir(DeployTestCase):
+    def setUp(self):
+        self.stage = stage_dir('deploy_sitedir')
+        git_init()
+        copytree(os.path.join(test_data_dir, 'site_dir'), self.stage)
+        check_call_silent(['git', 'add', 'docums.yml', 'docs'])
+        check_call_silent(['git', 'commit', '-m', 'initial commit'])
+
+    def test_default(self):
+        assertPopen(['dvci', 'deploy', '1.0'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+        self._test_deploy()
+
+
+class TestDeployOtherRemote(DeployTestCase):
+    def setUp(self):
+        self.stage_origin = stage_dir('deploy_remote')
+        git_init()
+        copytree(os.path.join(test_data_dir, 'remote'), self.stage_origin)
+        check_call_silent(['git', 'add', 'docums.yml', 'docs'])
+        check_call_silent(['git', 'commit', '-m', 'initial commit'])
+        check_call_silent(['git', 'config', 'receive.denyCurrentBranch',
+                           'ignore'])
+
+        self.stage = stage_dir('deploy_remote_clone')
+        check_call_silent(['git', 'clone', self.stage_origin, '.'])
+        git_config()
+
+    def _test_rev(self, branch):
+        clone_rev = git_utils.get_latest_commit(branch)
+        with pushd(self.stage_origin):
+            self.assertEqual(git_utils.get_latest_commit(branch), clone_rev)
+
+    def test_default(self):
+        check_call_silent(['git', 'remote', 'rename', 'origin', 'myremote'])
+
+        assertPopen(['dvci', 'deploy', '1.0', '-p'])
+        check_call_silent(['git', 'checkout', 'mybranch'])
+        self._test_deploy()
+        self._test_rev('mybranch')
+
+    def test_explicit_branch(self):
+        check_call_silent(['git', 'remote', 'rename', 'origin', 'myremote'])
+
+        assertPopen(['dvci', 'deploy', '1.0', '-b', 'pages', '-p'])
+        check_call_silent(['git', 'checkout', 'pages'])
+        self._test_deploy()
+        self._test_rev('pages')
+
+    def test_explicit_remote(self):
+        check_call_silent(['git', 'remote', 'rename', 'origin', 'remote'])
+
+        assertPopen(['dvci', 'deploy', '1.0', '-r', 'remote', '-p'])
+        check_call_silent(['git', 'checkout', 'mybranch'])
+        self._test_deploy()
+        self._test_rev('mybranch')
+
+
+class TestDeployNoDirectoryUrls(unittest.TestCase):
+    def setUp(self):
+        self.stage = stage_dir('deploy_no_directory_urls')
+        git_init()
+        copytree(os.path.join(test_data_dir, 'no_directory_urls'), self.stage)
+        check_call_silent(['git', 'add', 'docums.yml', 'docs'])
+        check_call_silent(['git', 'commit', '-m', 'initial commit'])
+
+    def test_default(self):
+        assertPopen(['dvci', 'deploy', '1.0', 'latest'])
+        check_call_silent(['git', 'checkout', 'gh-pages'])
+
+        with open('latest/index.html') as f:
+            self.assertRegex(f.read(), match_redir('../1.0/index.html'))
+        with open('latest/page.html') as f:
+            self.assertRegex(f.read(),
+                             match_redir('../1.0/page.html'))

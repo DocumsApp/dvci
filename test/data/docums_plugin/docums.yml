@@ -1,0 +1,9 @@
+site_name: test
+site_url: https://example.invalid/
+theme:
+  name: docums
+plugins:
+  - dvci
+
+nav:
+  - Home: index.md

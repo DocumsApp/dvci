@@ -1,0 +1,3 @@
+include CHANGES.md
+include dvci/templates/redirect.html
+recursive-include dvci/themes *.js *.css

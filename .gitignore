@@ -1,0 +1,9 @@
+*.pyc
+/.coverage
+/.coverage.*
+/.eggs/
+/dvci.egg-info/
+/build/
+/dist/
+/htmlcov/
+/test/stage/

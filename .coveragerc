@@ -1,0 +1,16 @@
+[run]
+source = dvci
+parallel = True
+branch = True
+
+[paths]
+source =
+  dvci/
+  /usr/local/lib/*/site-packages/dvci/
+
+[report]
+exclude_lines =
+  pragma: no cover
+  raise NotImplementedError
+  return NotImplemented
+  def __repr__
